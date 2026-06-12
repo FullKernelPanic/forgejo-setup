@@ -1,0 +1,129 @@
+services:
+  webserver:
+    image: caddy:2.11.4-alpine
+    command: ["caddy", "run", "-c", "/etc/caddy/Caddyfile.${ENVIRONMENT}"]
+    container_name: caddy
+    restart: unless-stopped
+    user: 1000:1000
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - APP_DOMAIN=${APP_DOMAIN}
+    volumes:
+      - ./.docker/caddy/Caddyfile.local:/etc/caddy/Caddyfile.local
+      - ./.docker/caddy/Caddyfile.prod:/etc/caddy/Caddyfile.prod
+      - ./.docker/caddy/Caddyfile.common:/etc/caddy/Caddyfile.common
+      - caddy_data:/data
+    depends_on:
+      - anubis
+      - forgejo
+    networks:
+      default:
+        aliases:
+          - forgejo.internal
+    healthcheck:
+      test: [ "CMD", "curl", "http://127.0.0.1/healthz" ]
+      interval: 5s
+      timeout: 30s
+      retries: 5
+      start_period: 500ms
+
+
+  anubis:
+    image: ghcr.io/techarohq/anubis:latest
+    environment:
+      BIND: ":8080"
+      DIFFICULTY: "4"
+      METRICS_BIND: ":9090"
+      SERVE_ROBOTS_TXT: "false"
+      COOKIE_SECURE: false
+      TARGET: "http://forgejo:3000"
+      POLICY_FNAME: "/data/cfg/botPolicies.yaml"
+      OG_PASSTHROUGH: "true"
+      OG_EXPIRY_TIME: "24h"
+    healthcheck:
+      test: ["CMD", "anubis", "--healthcheck"]
+      interval: 5s
+      timeout: 30s
+      retries: 5
+      start_period: 500ms
+    volumes:
+      - "./.docker/anubis/config/botPolicies.yaml:/data/cfg/botPolicies.yaml:ro"
+
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:15
+    container_name: forgejo-server
+    restart: always
+    volumes:
+      - .docker/forgejo/data:/data
+    depends_on:
+      - database
+    environment:
+      - FORGEJO__database__DB_TYPE=mysql
+      - FORGEJO__database__HOST=database:3306
+      - FORGEJO__database__NAME=${DATABASE_FORGEJO_DBNAME}
+      - FORGEJO__database__USER=${DATABASE_FORGEJO_USER}
+      - FORGEJO__database__PASSWD=${DATABASE_FORGEJO_PASSWORD}
+      - FORGEJO__server__ROOT_URL=${FORGEJO_ROOT_URL}
+      - FORGEJO__server__SSH_PORT=2222
+    healthcheck:
+      test: ["CMD", "curl", "http://127.0.0.1:3000/health"]
+      interval: 5s
+      timeout: 30s
+      retries: 5
+      start_period: 500ms
+    ports:
+      - "2222:22"
+
+  docker-in-docker:
+    image: docker:dind
+    container_name: "docker_dind"
+    privileged: true
+    command: ["dockerd", "-H", "tcp://0.0.0.0:2375", "--tls=false"]
+    restart: "unless-stopped"
+
+  runner:
+    image: "data.forgejo.org/forgejo/runner:12"
+    links:
+      - docker-in-docker
+    depends_on:
+      docker-in-docker:
+        condition: service_started
+      forgejo:
+        condition: service_healthy
+    container_name: "runner"
+    environment:
+      DOCKER_HOST: tcp://docker-in-docker:2375
+    volumes:
+      - ./.docker/runner/data:/data
+    restart: "unless-stopped"
+    command: "forgejo-runner daemon --config runner-config.yml"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1500M
+  
+  database:
+    build:
+      context: .
+      dockerfile: .docker/database/Dockerfile
+      args:
+        DATABASE_FORGEJO_USER: ${DATABASE_FORGEJO_USER}
+        DATABASE_FORGEJO_DBNAME: ${DATABASE_FORGEJO_DBNAME}
+        DATABASE_FORGEJO_PASSWORD: ${DATABASE_FORGEJO_PASSWORD}
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DATABASE_ROOT_PASSWORD}
+    volumes:
+      - ".docker/database/data:/var/lib/mysql"
+    command: --innodb-buffer-pool-size=512M
+    healthcheck:
+      test: [ "CMD", "healthcheck.sh", "--connect", "--innodb_initialized" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  caddy_data:

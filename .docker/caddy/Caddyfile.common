@@ -1,0 +1,26 @@
+:80 {
+    respond /healthz "OK\n" 200
+}
+
+forgejo.{$APP_DOMAIN} {
+	encode gzip zstd
+
+	#reverse_proxy forgejo:3000
+	reverse_proxy anubis:8080 {
+        header_up X-Real-IP {client_ip}
+        header_up X-Forwarded-Proto {scheme};
+        header_up Host {host}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Frame-Options DENY
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+}
+
+http://forgejo.internal {
+    reverse_proxy forgejo:3000
+}
